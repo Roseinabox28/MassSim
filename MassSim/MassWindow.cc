@@ -11,10 +11,15 @@ double drand48()
     return (rand() / (RAND_MAX + 1.0));
 }
 
-MassWindow::MassWindow(QWidget * parent):
+
+MassWindow::MassWindow(double dt,
+                       double graphics_interval,
+                       size_t num_threads,
+                       QWidget * parent):
     QDialog(parent),
     ui(new Ui::MassWindow),
-    _dt(1)
+    _barrier(num_threads + 1),
+    _dt(dt)
 {
     ui->setupUi(this);
 
@@ -30,16 +35,16 @@ MassWindow::MassWindow(QWidget * parent):
 
     timer = new QTimer(this);
     connect(timer, SIGNAL(timeout()), this, SLOT(advance()));
-    timer->start(10);
+    timer->start(graphics_interval*1e3);
 
     resize(width*1.1, height*1.1);
 }
 
 void MassWindow::_init_mass(Mass * m,
-                            bool at_edges)
+                            bool at_edges) const
 {
-    double mass = 1e3;
-    double radius = 1;
+    double mass = 0.001;
+    double radius = 0.3;
 
     QVector2D position;
 
@@ -89,7 +94,10 @@ void MassWindow::_init_mass(Mass * m,
         }
     }
 
-    QVector2D velocity = 0.001*QVector2D(position.y(), -position.x());
+    double r = position.length();
+    double v = 0.9*sqrt(gravity_constant*_masses[0]->mass()/r);
+    QVector2D velocity = v*QVector2D(position.y(), -position.x())/r;
+    //QVector2D velocity = 0*0.0001*QVector2D(position.y(), -position.x());
 
     m->reset(position,
              velocity,
@@ -99,10 +107,15 @@ void MassWindow::_init_mass(Mass * m,
              radius);
 }
 
-void MassWindow::add_mass()
+void MassWindow::add_init_mass()
 {
     auto m = new Mass();
     _init_mass(m, false);
+    add_mass(m);
+}
+
+void MassWindow::add_mass(Mass * m)
+{
     _masses.push_back(m);
     scene->addItem(m);
     //std::cout << "ADD " << m << std::endl;
@@ -122,64 +135,108 @@ double cross(QVector2D const & a,
     return (a.x()*b.y() - a.y()*b.x());
 }
 
+QVector2D MassWindow::_compute_accel(Mass ** mass1,
+                                     QVector2D const & pos,
+                                     bool do_collisions)
+{
+    Mass * m1 = *mass1;
+    QVector2D total_force(0.0, 0.0);
+    for (auto & m2 : _masses)
+    {
+        if (m2 == m1)
+        {
+            continue;
+        }
+
+        auto diff = (m2->position() - pos);
+        double dist = diff.length();
+
+        if (do_collisions)
+        {
+            double r1 = (m1->radius() > 1) ? m1->radius() : 1;
+            double r2 = (m2->radius() > 1) ? m2->radius() : 1;
+
+            if (dist <= (r1 + r2))
+            {
+                m1->add_collision(m2);
+            }
+        }
+
+        auto force = diff*(gravity_constant*m1->mass()*m2->mass()/
+                           (dist*dist*dist));
+        total_force += force;
+    }
+    return total_force/m1->mass();
+}
+
 void MassWindow::advance()
 {
-    double max_speed_sqrd = 0.0;
-
     struct timespec start_time;
     clock_gettime(CLOCK_REALTIME, &start_time);
 
     // Compute inter-mass forces.
-    _collision_pairs.clear();
     for (auto & m1 : _masses)
     {
-        QVector2D total_force(0.0, 0.0);
-        for (auto & m2 : _masses)
+        m1->clear_collisions();
+        auto const & p1 = m1->position();
+        auto const & v1 = m1->velocity();
+        auto a1 = _compute_accel(&m1, p1, true);
+
+        auto p2 = p1 + 0.5*v1*_dt;
+        auto v2 = v1 + 0.5*a1*_dt;
+        auto a2 = _compute_accel(&m1, p2, false);
+
+        auto p3 = p1 + 0.5*v2*_dt;
+        auto v3 = v1 + 0.5*a2*_dt;
+        auto a3 = _compute_accel(&m1, p3, false);
+
+        auto p4 = p1 + v3*_dt;
+        auto v4 = v1 + a3*_dt;
+        auto a4 = _compute_accel(&m1, p4, false);
+
+        auto pos = p1 + (_dt/6.0)*(v1 + 2*v2 + 2*v3 + v4);
+        auto vel = v1 + (_dt/6.0)*(a1 + 2*a2 + 2*a3 + a4);
+
+        m1->set_next_state(pos, vel);
+    }
+
+    struct timespec end_time;
+    clock_gettime(CLOCK_REALTIME, &end_time);
+    auto cycle_time = delta_time(start_time, end_time);
+    _sum_cycle_time += cycle_time;
+    if (cycle_time > _max_cycle_time)
+    {
+        _max_cycle_time = cycle_time;
+    }
+    _num_cycles++;
+
+    double max_speed_sqrd = 0.0;
+
+    _collision_pairs.clear();
+
+    for (auto & m1 : _masses)
+    {
+        m1->update(_dt);
+        for (auto & m2 : m1->collisions())
         {
-            if (m2 == m1)
-            {
-                continue;
-            }
-
-            auto diff = (m2->position() - m1->position());
-            double dist = diff.length();
-
-            double r1 = (m1->radius() > 1) ? m1->radius() : 1;
-            double r2 = (m2->radius() > 1) ? m2->radius() : 1;
-            if ((dist <= (r1 + r2)))
-            {
-                _collision_pairs.push_back(std::make_pair(&m1, &m2));
-            }
-            else
-            {
-                auto force = diff*(1e-3*m1->mass()*m2->mass()/
-                                   (dist*dist*dist));
-                total_force += force;
-            }
+            _collision_pairs.push_back(std::make_pair(&m1, &m2));
         }
 
-        if (_collision_pairs.empty())
-        {
-            m1->update(_dt, total_force);
-        }
-
-        auto vel = m1->velocity().length();
-        auto speed_sqrd = vel*vel;
+        auto speed_sqrd = QVector2D::dotProduct(m1->velocity(), m1->velocity());
         if (speed_sqrd > max_speed_sqrd)
         {
             max_speed_sqrd = speed_sqrd;
         }
     }
 
-    struct timespec update_time;
-    clock_gettime(CLOCK_REALTIME, &update_time);
-
-    if (false && max_speed_sqrd > 0.0)
+#if 0
+    if (max_speed_sqrd > 0.0)
     {
         const double max_delta_position = 10.0;
         _dt = max_delta_position/sqrt(max_speed_sqrd);
-        std::cout << "dt " << _dt << std::endl;
+        //std::cout << "dt " << _dt << std::endl;
     }
+#endif
 
     if (_collision_pairs.empty())
     {
@@ -206,7 +263,7 @@ void MassWindow::advance()
                 (m2 == *_collision_pairs[j].first) ||
                 (m2 == *_collision_pairs[j].second))
             {
-                std::cout << "multiple" << std::endl;
+                //std::cout << "multiple" << std::endl;
                 break;
             }
         }
@@ -255,9 +312,10 @@ void MassWindow::advance()
 
         _init_mass(m2, true);
     }
+}
 
-    struct timespec end_time;
-    clock_gettime(CLOCK_REALTIME, &end_time);
-    std::cout << "time " << delta_time(start_time, update_time)
-              << ", " << delta_time(start_time, end_time) << std::endl;
+void MassWindow::print_stats() const
+{
+    std::cout << "Average cycle time: " << 1e3*_sum_cycle_time/_num_cycles << " ms" << std::endl;
+    std::cout << "Max cycle time: " << 1e3*_max_cycle_time << " ms" << std::endl;
 }
