@@ -7,7 +7,7 @@ int main( int argc, char **argv )
 {
     auto seed = clock();
     std::cout << "Random seed = " << seed << std::endl;
-    srand48(seed);
+    //srand48(seed);
 
     QApplication app(argc, argv);
 

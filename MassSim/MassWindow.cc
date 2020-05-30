@@ -1,9 +1,15 @@
 
 #include <iostream>
 #include <QGraphicsEllipseItem>
+#include <math.h>
+#include <stdlib.h>
 #include "MassWindow.h"
 #include "ui_MassWindow.h"
 
+double drand48()
+{
+    return (rand() / (RAND_MAX + 1.0));
+}
 
 MassWindow::MassWindow(QWidget * parent):
     QDialog(parent),
@@ -24,7 +30,7 @@ MassWindow::MassWindow(QWidget * parent):
 
     timer = new QTimer(this);
     connect(timer, SIGNAL(timeout()), this, SLOT(advance()));
-    timer->start(200);
+    timer->start(10);
 
     resize(width*1.1, height*1.1);
 }
